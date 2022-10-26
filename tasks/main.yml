@@ -1,0 +1,115 @@
+---
+# Add IP address via DNS lookup if just a hostname.
+- name: SSH Keyscan > Discover Connection Endpoints
+  ansible.builtin.set_fact:
+    ssh_hosts: >-
+      {{ ssh.host }}
+      {% if ssh.host | ansible.utils.ipaddr is sameas false %}
+      ,
+      {{ lookup('pipe', 'dig +short ' + ssh.host) | replace('\n', ',')}}
+      {% endif %}
+    ssh_port: "{{ ssh.port | default(22) }}"
+
+- name: SSH Keyscan > Debug > Connection Endpoints
+  ansible.builtin.debug:
+    var: ssh_hosts
+
+- name: SSH Keyscan > Record SSH Keys (RSA, DSA, ECDSA, ED25519)
+  ansible.builtin.set_fact:
+    host_keys:
+      rsa: "{{ lookup('pipe', 'ssh-keyscan -trsa -p' + ssh_port + ' ' + ssh_hosts, errors='ignore') }}"
+      dsa: "{{ lookup('pipe', 'ssh-keyscan -tdsa -p' + ssh_port + ' ' + ssh_hosts, errors='ignore') }}"
+      ecdsa: "{{ lookup('pipe', 'ssh-keyscan -tecdsa -p' + ssh_port + ' ' + ssh_hosts, errors='ignore') }}"
+      ed25519: "{{ lookup('pipe', 'ssh-keyscan -ted25519 -p' + ssh_port + ' ' + ssh_hosts, errors='ignore') }}"
+
+# - name: SSH Keyscan > Debug > Host Keys
+#   ansible.builtin.debug:
+#     var: host_keys
+
+- name: SSH Keyscan > Assert > Minimum 1 key found
+  ansible.builtin.fail:
+    msg: No SSH Host Key found!
+  when:
+    - host_keys.rsa == ''
+    - host_keys.dsa == ''
+    - host_keys.ecdsa == ''
+    - host_keys.ed25519 == ''
+
+- name: SSH Keyscan > Set Known Hosts Paths
+  ansible.builtin.set_fact:
+    known_hosts_filepath: "{% if global_known_hosts %}/etc/ssh/{% else %}~/.ssh/{% endif %}known_hosts.d/"
+    known_hosts_systempath: "/etc/ssh/known_hosts.d/"
+    known_hosts_userpath: "~/.ssh/known_hosts.d/"
+
+- name: SSH Keyscan > Create Known Hosts Folder > {{ known_hosts_systempath }}
+  ansible.builtin.file:
+    path: "{{ known_hosts_systempath }}"
+    state: directory
+    mode: '0755'
+  become: true
+
+- name: SSH Keyscan > Create Known Hosts Folder > {{ known_hosts_userpath }}
+  ansible.builtin.file:
+    path: "{{ known_hosts_userpath }}"
+    state: directory
+    mode: '0700'
+  become: false
+
+- name: SSH Keyscan > Configure SSH Option > GlobalKnownHostsFile
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/ssh_config
+    regexp: '^GlobalKnownHostsFile'
+    line: GlobalKnownHostsFile {{ known_hosts_systempath }}%k /etc/ssh/known_hosts
+  become: true
+
+- name: SSH Keyscan > Configure SSH Option > UserKnownHostsFile
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/ssh_config
+    regexp: '^UserKnownHostsFile'
+    line: UserKnownHostsFile {{ known_hosts_userpath }}%k ~/.ssh/known_hosts
+  become: true
+
+- name: SSH Keyscan > Host Key > Diff
+  ansible.builtin.blockinfile:
+    backup: true
+    marker: "# {mark} SSH Keys for {{ ssh.host }}"
+    create: true
+    path: "{{ known_hosts_filepath }}{{ ssh.host }}"
+    mode: 0644
+    block: |
+      {{ host_keys.rsa | default('# RESERVED FOR RSA KEY', true) }}
+      {{ host_keys.dsa | default('# RESERVED FOR DSA KEY', true) }}
+      {{ host_keys.ecdsa | default('# RESERVED FOR ECDSA KEY', true) }}
+      {{ host_keys.ed25519 | default('# RESERVED FOR ED25519 KEY', true) }}
+  check_mode: true
+  diff: true
+  become: false
+  register: check_host_entry
+  when: verify_host_keys | default(true)
+
+# - name: SSH Keyscan > Debug > Host Keys
+#   debug:
+#     var: check_host_entry
+#   when:
+#     - check_host_entry.changed
+
+- name: SSH Keyscan > Alert > SSH Host Key changed!
+  ansible.builtin.pause:
+    prompt: The Host's SSH key has changed, press return to continue. Press Ctrl+c and then "a" to abort
+  when:
+    - check_host_entry.changed
+    - verify_host_keys | default(true)
+
+- name: SSH Keyscan > Host Keys > Commit Changes
+  ansible.builtin.blockinfile:
+    backup: true
+    marker: "# {mark} SSH Keys for {{ ssh.host }}"
+    create: true
+    path: "{{ known_hosts_filepath }}{{ ssh.host }}"
+    mode: 0644
+    block: |
+      {{ host_keys.rsa | default('# RESERVED FOR RSA KEY', true) }}
+      {{ host_keys.dsa | default('# RESERVED FOR DSA KEY', true) }}
+      {{ host_keys.ecdsa | default('# RESERVED FOR ECDSA KEY', true) }}
+      {{ host_keys.ed25519 | default('# RESERVED FOR ED25519 KEY', true) }}
+  become: "{{ global_known_hosts }}"
